@@ -10,9 +10,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -244,22 +248,25 @@ func classifyReason(msg string) string {
 	}
 }
 
-// buildHTTPClient creates an HTTP client with auth/TLS from a Secret.
+// buildHTTPClient creates an HTTP client with auth/TLS from a Secret. The client
+// always follows the Docker/OCI token workflow (a 401 "WWW-Authenticate: Bearer"
+// challenge), so registry discovery works against token-auth registries such as
+// GitLab, Docker Hub, GHCR and Artifactory — anonymously when no Secret is set,
+// or authenticated with the Secret's basic credentials when one is.
 func (r *DiscoveryPolicyReconciler) buildHTTPClient(ctx context.Context, secretRef *corev1.LocalObjectReference) (*http.Client, error) {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
-	if secretRef == nil {
-		return httpClient, nil
-	}
-
-	secret := &corev1.Secret{}
-	secretNamespace := r.SecretNamespace
-	if secretNamespace == "" {
-		secretNamespace = "drop-system"
-	}
-	key := types.NamespacedName{Name: secretRef.Name, Namespace: secretNamespace}
-	if err := r.Get(ctx, key, secret); err != nil {
-		return nil, fmt.Errorf("fetching secret %s/%s: %w", secretNamespace, secretRef.Name, err)
+	var secret *corev1.Secret
+	if secretRef != nil {
+		secret = &corev1.Secret{}
+		secretNamespace := r.SecretNamespace
+		if secretNamespace == "" {
+			secretNamespace = "drop-system"
+		}
+		key := types.NamespacedName{Name: secretRef.Name, Namespace: secretNamespace}
+		if err := r.Get(ctx, key, secret); err != nil {
+			return nil, fmt.Errorf("fetching secret %s/%s: %w", secretNamespace, secretRef.Name, err)
+		}
 	}
 
 	transport := &authTransport{
@@ -268,59 +275,240 @@ func (r *DiscoveryPolicyReconciler) buildHTTPClient(ctx context.Context, secretR
 	}
 
 	// Configure TLS if cert data is present
-	if caCert, ok := secret.Data["ca.crt"]; ok {
-		pool := x509.NewCertPool()
-		pool.AppendCertsFromPEM(caCert)
+	if secret != nil {
+		if caCert, ok := secret.Data["ca.crt"]; ok {
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(caCert)
 
-		tlsConfig := &tls.Config{
-			RootCAs:    pool,
-			MinVersion: tls.VersionTLS12,
-		}
+			tlsConfig := &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			}
 
-		if cert, ok := secret.Data["tls.crt"]; ok {
-			if key, ok := secret.Data["tls.key"]; ok {
-				clientCert, err := tls.X509KeyPair(cert, key)
-				if err == nil {
-					tlsConfig.Certificates = []tls.Certificate{clientCert}
+			if cert, ok := secret.Data["tls.crt"]; ok {
+				if key, ok := secret.Data["tls.key"]; ok {
+					clientCert, err := tls.X509KeyPair(cert, key)
+					if err == nil {
+						tlsConfig.Certificates = []tls.Certificate{clientCert}
+					}
 				}
 			}
-		}
 
-		transport.base = &http.Transport{TLSClientConfig: tlsConfig}
+			transport.base = &http.Transport{TLSClientConfig: tlsConfig}
+		}
 	}
 
 	httpClient.Transport = transport
 	return httpClient, nil
 }
 
-// authTransport adds authentication headers from a Secret to HTTP requests.
+// authTransport authenticates outgoing HTTP requests. It applies static
+// credentials from a Secret (bearer token, basic auth, custom headers) and, for
+// registries using the Docker/OCI token workflow, transparently follows a 401
+// "WWW-Authenticate: Bearer" challenge to obtain and cache a short-lived token.
+// The Secret may be nil, in which case only anonymous challenge-following is done.
 type authTransport struct {
 	base   http.RoundTripper
 	secret *corev1.Secret
+
+	mu     sync.Mutex
+	tokens map[string]string // challenge (realm|service|scope) -> bearer token
 }
 
 func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// ****** auth
+	t.applyStaticAuth(req)
+
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+
+	// Follow the Docker/OCI token workflow: on a Bearer challenge, fetch a token
+	// from the realm (once) and retry the request with it.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if challenge := parseBearerChallenge(resp.Header.Get("WWW-Authenticate")); challenge != nil {
+			token, terr := t.fetchToken(req.Context(), challenge)
+			if terr == nil && token != "" {
+				drainAndClose(resp)
+				retry := req.Clone(req.Context())
+				retry.Header.Set("Authorization", "Bearer "+token)
+				return t.base.RoundTrip(retry)
+			}
+		}
+	}
+
+	return resp, nil
+}
+
+// applyStaticAuth sets static credentials from the Secret on the request.
+func (t *authTransport) applyStaticAuth(req *http.Request) {
+	if t.secret == nil {
+		return
+	}
 	if token, ok := t.secret.Data["token"]; ok {
 		req.Header.Set("Authorization", "Bearer "+string(token))
 	}
-
-	// Basic auth
 	if username, ok := t.secret.Data["username"]; ok {
 		if password, ok := t.secret.Data["password"]; ok {
 			req.SetBasicAuth(string(username), string(password))
 		}
 	}
-
-	// Custom headers (headers.<name>)
 	for key, value := range t.secret.Data {
 		if strings.HasPrefix(key, secretHeaderPrefix) {
 			headerName := key[len(secretHeaderPrefix):]
 			req.Header.Set(headerName, string(value))
 		}
 	}
+}
 
-	return t.base.RoundTrip(req)
+// fetchToken performs the Docker/OCI token request against the challenge realm,
+// authenticating with the Secret's basic credentials when present. Tokens are
+// cached per (realm, service, scope) for the lifetime of the client.
+func (t *authTransport) fetchToken(ctx context.Context, c *bearerChallenge) (string, error) {
+	cacheKey := c.realm + "|" + c.service + "|" + c.scope
+
+	t.mu.Lock()
+	if tok, ok := t.tokens[cacheKey]; ok {
+		t.mu.Unlock()
+		return tok, nil
+	}
+	t.mu.Unlock()
+
+	u, err := url.Parse(c.realm)
+	if err != nil {
+		return "", fmt.Errorf("parsing token realm: %w", err)
+	}
+	q := u.Query()
+	if c.service != "" {
+		q.Set("service", c.service)
+	}
+	if c.scope != "" {
+		q.Set("scope", c.scope)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	// Authenticate the token request with basic credentials when available.
+	if t.secret != nil {
+		if username, ok := t.secret.Data["username"]; ok {
+			if password, ok := t.secret.Data["password"]; ok {
+				req.SetBasicAuth(string(username), string(password))
+			}
+		}
+	}
+
+	// Use the base transport directly to avoid recursing into RoundTrip.
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return "", err
+	}
+	defer drainAndClose(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tr struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tr); err != nil {
+		return "", fmt.Errorf("decoding token response: %w", err)
+	}
+	token := tr.Token
+	if token == "" {
+		token = tr.AccessToken
+	}
+	if token == "" {
+		return "", fmt.Errorf("token endpoint returned no token")
+	}
+
+	t.mu.Lock()
+	if t.tokens == nil {
+		t.tokens = make(map[string]string)
+	}
+	t.tokens[cacheKey] = token
+	t.mu.Unlock()
+
+	return token, nil
+}
+
+// bearerChallenge holds the parsed parameters of a "WWW-Authenticate: Bearer"
+// challenge returned by a registry.
+type bearerChallenge struct {
+	realm   string
+	service string
+	scope   string
+}
+
+// parseBearerChallenge parses a `Bearer realm="...",service="...",scope="..."`
+// header value. It returns nil when the header is absent, not a Bearer scheme,
+// or missing a realm.
+func parseBearerChallenge(header string) *bearerChallenge {
+	const prefix = "bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return nil
+	}
+
+	c := &bearerChallenge{}
+	for _, part := range splitOutsideQuotes(header[len(prefix):], ',') {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		switch strings.ToLower(key) {
+		case "realm":
+			c.realm = val
+		case "service":
+			c.service = val
+		case "scope":
+			c.scope = val
+		}
+	}
+
+	if c.realm == "" {
+		return nil
+	}
+	return c
+}
+
+// splitOutsideQuotes splits s on sep, ignoring separators inside double quotes.
+func splitOutsideQuotes(s string, sep rune) []string {
+	var parts []string
+	var buf strings.Builder
+	inQuotes := false
+	for _, r := range s {
+		switch {
+		case r == '"':
+			inQuotes = !inQuotes
+			buf.WriteRune(r)
+		case r == sep && !inQuotes:
+			parts = append(parts, buf.String())
+			buf.Reset()
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	if buf.Len() > 0 {
+		parts = append(parts, buf.String())
+	}
+	return parts
+}
+
+// drainAndClose discards and closes a response body so the connection can be
+// reused.
+func drainAndClose(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
 }
 
 // SetupWithManager sets up the controller with the Manager.
