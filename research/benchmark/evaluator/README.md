@@ -14,17 +14,23 @@ The evaluator intentionally separates three concepts:
 - node-local cache state: whether image `I` is available on node `n`,
 - developer-facing impact: affected jobs, affected job-minutes, and pipeline critical-path delay.
 
-## Quick start
+## Setup
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+```
+
+## Synthetic benchmark
+
+```bash
 
 python generate_synthetic_day.py --out data --jobs 25000 --nodes 100 --images 30 --seed 20260621
 python evaluate_replay.py --data data --out outputs
 python evaluate_discovery_strategies.py --data data --out outputs/strategy_eval
 python plot_pipeline_gantt.py --modeled-jobs outputs/modeled_jobs_no_prewarming.csv --out figures/example_gantt.png
+python render_benchmark_report.py --out outputs --figures figures
 ```
 
 The checked-in `data/` and `outputs/` directories are generated from this command sequence.
@@ -65,23 +71,34 @@ cover GitLab Kubernetes-executor pods (`pod=~"runner-.*"`).
 It assumes:
 
 - Kubernetes events are shipped to Loki by **Grafana Alloy**
-  (`loki.source.kubernetes_events`), so each log line is a JSON event with
-  `reason`, `name`, and `msg` fields. Pull durations and image sizes are parsed
-  from kubelet "Successfully pulled image ..." messages.
+  (`loki.source.kubernetes_events`) or another event handler. JSON and logfmt
+  event payloads are supported; pull durations and image sizes are parsed from
+  kubelet "Successfully pulled image ..." messages.
 - Per-pod placement and lifecycle come from **kube-state-metrics**
   (`kube_pod_info`, `kube_pod_container_info`, `kube_pod_created`,
   `kube_pod_start_time`, `kube_pod_completion_time`).
 
 ```bash
-# Port-forward Prometheus and Loki first, then:
+# Use the Prometheus-compatible API URL and the Loki read URL.
+# The Mimir deployment used by this project exposes that API under /prometheus.
 python fetch_cluster_data.py \
-  --prometheus-url http://localhost:9090 \
-  --loki-url       http://localhost:3100 \
+  --prometheus-url https://mimir.example.com/prometheus \
+  --loki-url       https://loki.example.com \
   --lookback 24h \
   --out data
+```
 
-python evaluate_replay.py --data data --out outputs
-python evaluate_discovery_strategies.py --data data --out outputs/strategy_eval
+For a Kubernetes event-handler stream using logfmt, select only the image
+events. The fetcher parses logfmt directly, so do not add `| json` or
+`line_format`:
+
+```bash
+python fetch_cluster_data.py \
+  --prometheus-url https://mimir.example.com/prometheus \
+  --loki-url https://loki.example.com \
+  --loki-query '{job=~"integrations/kubernetes/eventhandler",namespace="build-elastic",reason=~"Pulling|Pulled|AlreadyPresent"}' \
+  --lookback 24h \
+  --out data
 ```
 
 It writes `images.csv`, `gitlab_runner_jobs.csv`,
@@ -90,9 +107,39 @@ schema the evaluator expects. Override the queries when your labels differ:
 
 - `--pod-selector` — kube-state-metrics selector for your runner pods.
 - `--loki-query` — LogQL selector for your Alloy event stream.
+- `--loki-bucket` — Loki query window per request (default: one hour), avoiding
+  the result limit truncating a busy multi-hour window.
 - `--usage-query` — PromQL for running-container usage grouped by `image`.
 - `--start` / `--end` — RFC3339 window (defaults to the last `--lookback`).
 - `--token` / `FETCH_TOKEN` — bearer token if the APIs require auth.
+
+Each Loki request covers one hour by default. This avoids a busy 24-hour event
+stream being truncated by Loki's per-request result limit. Use
+`--loki-bucket 30m` or `--loki-bucket 2h` to change it.
+
+## Real-cluster replay and report
+
+Use timestamps inside the fetched window. `--prewarm-at` must be before the
+developer window; data before it is used to compute discovery rankings.
+
+```bash
+python evaluate_replay.py \
+  --data data --out outputs \
+  --prewarm-at 2026-07-21T08:45:00Z \
+  --developer-start 2026-07-21T09:00:00Z
+
+python evaluate_discovery_strategies.py \
+  --data data --out outputs/strategy_eval \
+  --prewarm-at 2026-07-21T08:45:00Z \
+  --developer-start 2026-07-21T09:00:00Z \
+  --developer-end 2026-07-21T17:00:00Z
+
+python render_benchmark_report.py --out outputs --figures figures
+```
+
+The renderer produces `policy_impact.png`, `strategy_impact_topk.png`, and
+`image_impact.png`, plus `benchmark_report.pdf` containing all three charts.
+Use `--top-k` and `--top-images` to control the strategy and image charts.
 
 The observed pull time each job experienced (`observed_image_wait_seconds`) and
 whether it was a cold hit (`observed_cold_hit`) are derived by joining real Loki
@@ -153,6 +200,7 @@ The script writes:
 - `outputs/modeled_jobs_<policy>.csv`: per-job replay output for each policy.
 - `outputs/pipeline_critical_path_delta_top10.csv`: pipeline-level delta for top-10 prewarming.
 - `figures/example_gantt.png`: example pipeline Gantt chart with image wait segments.
+- `figures/benchmark_report.pdf`: multi-page report with policy, discovery, and image-impact charts.
 
 ## Notes
 
