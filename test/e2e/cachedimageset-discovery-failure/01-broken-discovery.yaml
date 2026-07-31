@@ -1,0 +1,22 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: test-set-broken-prom
+spec:
+  queries:
+    - name: broken-query
+      type: prometheus
+      prometheus:
+        endpoint: "http://nonexistent-prometheus:9090"
+        query: "up{}"
+  signals:
+    - name: total-usage
+      query: broken-query
+      type: aggregate
+      aggregate:
+        method: sum
+  ranking:
+    strategy: signal
+    signal: total-usage
+  syncInterval: 30m
+  maxImages: 10

@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: cachedimage-pacing-global
+spec:
+  description: |
+    Verify the global maxConcurrentPulls cap bounds the TOTAL number of drop Pods
+    across all images (not just per image). With maxConcurrentPulls=1 and two
+    CachedImages referencing the same policy, at most one managed drop Pod should
+    ever be active at a time.
+  steps:
+    - name: Create PullPolicy with a global cap of 1
+      try:
+        - apply:
+            file: 01-pullpolicy.yaml
+    - name: Create two CachedImages referencing the policy
+      try:
+        - apply:
+            file: 02-images.yaml
+    - name: Sample pod count and assert it never exceeds the global cap
+      try:
+        - script:
+            timeout: 40s
+            content: |
+              deadline=$(( $(date +%s) + 30 ))
+              max_seen=0
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                count=$(kubectl get pods -n drop-system \
+                  -l app.kubernetes.io/managed-by=drop \
+                  --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+                  --no-headers 2>/dev/null | wc -l | tr -d ' ')
+                case "$count" in ''|*[!0-9]*) count=0 ;; esac
+                if [ "$count" -gt "$max_seen" ]; then max_seen=$count; fi
+                if [ "$count" -gt 1 ]; then
+                  echo "FAIL: global cap exceeded, saw $count active drop pods"
+                  kubectl get pods -n drop-system -l app.kubernetes.io/managed-by=drop -o wide
+                  exit 1
+                fi
+                sleep 1
+              done
+              echo "OK: global cap respected, peak active drop pods = $max_seen"
+    - name: Cleanup
+      try:
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: CachedImage
+              name: test-global-a
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: CachedImage
+              name: test-global-b
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: PullPolicy
+              name: test-global-cap

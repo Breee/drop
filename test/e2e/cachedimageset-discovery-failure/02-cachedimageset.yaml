@@ -1,0 +1,7 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImageSet
+metadata:
+  name: test-set-broken-discovery
+spec:
+  discoveryPolicyRef:
+    name: test-set-broken-prom

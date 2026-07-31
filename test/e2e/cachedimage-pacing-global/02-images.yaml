@@ -1,0 +1,19 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImage
+metadata:
+  name: test-global-a
+spec:
+  image: docker.io/library/busybox
+  tag: "1.36"
+  policyRef:
+    name: test-global-cap
+---
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImage
+metadata:
+  name: test-global-b
+spec:
+  image: docker.io/library/alpine
+  tag: "3.19"
+  policyRef:
+    name: test-global-cap

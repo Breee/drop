@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: cachedimageset-discovery-failure
+spec:
+  description: |
+    Verify that a CachedImageSet backed by a failing DiscoveryPolicy surfaces the
+    discovery failure in its own status (phase Degraded, Ready=False with the
+    DiscoveryPolicy's failure reason) instead of sitting silently in Pending with
+    "0/0 images cached".
+  steps:
+    - name: Create a DiscoveryPolicy with a broken Prometheus endpoint
+      try:
+        - apply:
+            file: 01-broken-discovery.yaml
+    - name: Create a CachedImageSet backed by the failing DiscoveryPolicy
+      try:
+        - apply:
+            file: 02-cachedimageset.yaml
+    - name: Assert the set is Degraded with the propagated failure reason
+      try:
+        - assert:
+            timeout: 120s
+            file: 03-assert-set-degraded.yaml
+    - name: Cleanup
+      try:
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: CachedImageSet
+              name: test-set-broken-discovery
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: DiscoveryPolicy
+              name: test-set-broken-prom

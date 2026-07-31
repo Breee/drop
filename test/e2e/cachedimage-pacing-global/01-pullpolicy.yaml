@@ -1,0 +1,10 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: PullPolicy
+metadata:
+  name: test-global-cap
+spec:
+  # Allow wide per-image fan-out, but cap the WHOLE cluster to a single pull so
+  # the global maxConcurrentPulls valve is what bounds concurrency.
+  maxConcurrentNodes: 5
+  maxConcurrentPulls: 1
+  minDelayBetweenPulls: 1s

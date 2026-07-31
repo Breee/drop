@@ -1,0 +1,12 @@
+# The set must surface the referenced DiscoveryPolicy's failure as its OWN status
+# (phase Degraded, Ready=False with the propagated reason) instead of sitting in
+# Pending with "0/0 images cached" and no hint about the broken discovery.
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImageSet
+metadata:
+  name: test-set-broken-discovery
+status:
+  phase: Degraded
+  (conditions[?type == 'Ready']):
+    - status: "False"
+      reason: DNSError
