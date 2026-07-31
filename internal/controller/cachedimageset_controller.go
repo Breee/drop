@@ -53,7 +53,7 @@ func (r *CachedImageSetReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// 2. Build desired image list
-	desiredImages := r.buildDesiredImages(ctx, imageSet)
+	desiredImages, disc := r.buildDesiredImages(ctx, imageSet)
 
 	// 3. List existing child CachedImage resources
 	existingChildren := &dropv1alpha1.CachedImageList{}
@@ -116,11 +116,24 @@ func (r *CachedImageSetReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("re-listing children: %w", err)
 	}
 
+	r.computeStatus(imageSet, existingChildren.Items, desiredImages, disc)
+
+	if err := r.Status().Patch(ctx, imageSet, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patching status: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// computeStatus derives the CachedImageSet phase and Ready condition from its
+// children and the health of any referenced DiscoveryPolicy, mutating the passed
+// imageSet's status in place.
+func (r *CachedImageSetReconciler) computeStatus(imageSet *dropv1alpha1.CachedImageSet, children []dropv1alpha1.CachedImage, desiredImages []dropv1alpha1.ImageEntry, disc *discoveryHealth) {
 	var imagesReady int32
 	var worstReason, worstMessage string
 	var hasDegraded bool
-	for i := range existingChildren.Items {
-		child := &existingChildren.Items[i]
+	for i := range children {
+		child := &children[i]
 		switch child.Status.Phase {
 		case phaseReady:
 			imagesReady++
@@ -137,28 +150,34 @@ func (r *CachedImageSetReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	imageSet.Status.ObservedGeneration = imageSet.Generation
-	imageSet.Status.ImagesManaged = int32(len(existingChildren.Items))
+	imageSet.Status.ImagesManaged = int32(len(children))
 	imageSet.Status.ImagesReady = imagesReady
 
-	if imagesReady == int32(len(desiredImages)) && len(desiredImages) > 0 {
+	discoveryBroken := disc != nil && disc.broken
+	switch {
+	case !discoveryBroken && imagesReady == int32(len(desiredImages)) && len(desiredImages) > 0:
 		imageSet.Status.Phase = phaseReady
-	} else if hasDegraded {
+	case discoveryBroken || hasDegraded:
 		imageSet.Status.Phase = phaseDegraded
-	} else {
+	default:
 		imageSet.Status.Phase = phasePending
 	}
 
-	now := metav1.Now()
 	readyCondition := metav1.Condition{
 		Type:               conditionTypeReady,
 		ObservedGeneration: imageSet.Generation,
-		LastTransitionTime: now,
+		LastTransitionTime: metav1.Now(),
 	}
 	switch {
 	case imageSet.Status.Phase == phaseReady:
 		readyCondition.Status = metav1.ConditionTrue
 		readyCondition.Reason = "Ready"
 		readyCondition.Message = fmt.Sprintf("All %d images are cached", imagesReady)
+	case discoveryBroken:
+		// Surface the discovery failure as the root cause so it is actionable.
+		readyCondition.Status = metav1.ConditionFalse
+		readyCondition.Reason = disc.reason
+		readyCondition.Message = disc.message
 	case hasDegraded && worstReason != "":
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = "Degraded"
@@ -169,37 +188,74 @@ func (r *CachedImageSetReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	default:
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = "Progressing"
-		readyCondition.Message = fmt.Sprintf("%d/%d images cached", imagesReady, len(desiredImages))
+		if disc != nil && !disc.ready && !disc.broken && disc.message != "" {
+			readyCondition.Message = disc.message
+		} else {
+			readyCondition.Message = fmt.Sprintf("%d/%d images cached", imagesReady, len(desiredImages))
+		}
 	}
 	meta.SetStatusCondition(&imageSet.Status.Conditions, readyCondition)
-
-	if err := r.Status().Patch(ctx, imageSet, patch); err != nil {
-		return ctrl.Result{}, fmt.Errorf("patching status: %w", err)
-	}
-
-	return ctrl.Result{}, nil
 }
 
-// buildDesiredImages constructs the desired image list from static images and discovery.
-func (r *CachedImageSetReconciler) buildDesiredImages(ctx context.Context, imageSet *dropv1alpha1.CachedImageSet) []dropv1alpha1.ImageEntry {
+// buildDesiredImages constructs the desired image list from static images and
+// discovery, and reports the health of a referenced DiscoveryPolicy (nil when no
+// discoveryPolicyRef is set).
+func (r *CachedImageSetReconciler) buildDesiredImages(ctx context.Context, imageSet *dropv1alpha1.CachedImageSet) ([]dropv1alpha1.ImageEntry, *discoveryHealth) {
 	var desired []dropv1alpha1.ImageEntry
 
 	// Static images
 	desired = append(desired, imageSet.Spec.Images...)
 
-	// Discovery policy images
-	if imageSet.Spec.DiscoveryPolicyRef != nil {
-		dp := &dropv1alpha1.DiscoveryPolicy{}
-		key := client.ObjectKey{Name: imageSet.Spec.DiscoveryPolicyRef.Name}
-		if err := r.Get(ctx, key, dp); err == nil {
-			for _, discovered := range dp.Status.DiscoveredImages {
-				entry := parseImageRef(discovered.Image)
-				desired = append(desired, entry)
-			}
-		}
+	if imageSet.Spec.DiscoveryPolicyRef == nil {
+		return desired, nil
 	}
 
-	return desired
+	name := imageSet.Spec.DiscoveryPolicyRef.Name
+	health := &discoveryHealth{name: name}
+
+	dp := &dropv1alpha1.DiscoveryPolicy{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name}, dp); err != nil {
+		health.broken = true
+		if errors.IsNotFound(err) {
+			health.reason = "DiscoveryPolicyNotFound"
+			health.message = fmt.Sprintf("referenced DiscoveryPolicy %q not found", name)
+		} else {
+			health.reason = "DiscoveryPolicyError"
+			health.message = fmt.Sprintf("reading DiscoveryPolicy %q: %v", name, err)
+		}
+		return desired, health
+	}
+
+	for _, discovered := range dp.Status.DiscoveredImages {
+		desired = append(desired, parseImageRef(discovered.Image))
+	}
+
+	// Assess the policy's Ready condition so failures propagate to the set.
+	cond := meta.FindStatusCondition(dp.Status.Conditions, conditionTypeReady)
+	switch {
+	case cond == nil:
+		// No sync has completed yet — pending, not broken.
+		health.reason = "DiscoveryPending"
+		health.message = fmt.Sprintf("DiscoveryPolicy %q has not completed a sync yet", name)
+	case cond.Status == metav1.ConditionFalse:
+		health.broken = true
+		health.reason = cond.Reason
+		health.message = fmt.Sprintf("DiscoveryPolicy %q is failing: %s", name, cond.Message)
+	default:
+		health.ready = true
+	}
+
+	return desired, health
+}
+
+// discoveryHealth summarizes the state of a referenced DiscoveryPolicy so the
+// CachedImageSet can surface discovery failures in its own status.
+type discoveryHealth struct {
+	name    string
+	ready   bool
+	broken  bool // true when the policy is missing or its Ready condition is False
+	reason  string
+	message string
 }
 
 // parseImageRef splits a full image reference into ImageEntry.
