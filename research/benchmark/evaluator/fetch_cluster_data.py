@@ -45,6 +45,7 @@ import pandas as pd
 _RE_IMAGE_REF = re.compile(r'(?:image|Image)\s+"([^"]+)"')
 _RE_PULL_DURATION = re.compile(r"\bin\s+(\d+(?:\.\d+)?)(ms|s|m|h)\b")
 _RE_IMAGE_SIZE_BYTES = re.compile(r"(?i)\bimage\s+size:\s*(\d+)\s+bytes\b")
+_RE_LOGFMT_MESSAGE = re.compile(r'\b(?:message|msg)=("(?:[^"\\]|\\.)*"|\S+)')
 _DURATION_UNIT_SECONDS = {"ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
 
 
@@ -76,6 +77,22 @@ def infer_reason(msg: str) -> str:
     if "failed" in low:
         return "Failed"
     return ""
+
+
+def parse_event_body(line: str) -> dict[str, str]:
+    """Extract event fields from JSON or logfmt Loki lines."""
+    try:
+        body = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        body = {}
+        match = _RE_LOGFMT_MESSAGE.search(line or "")
+        if match:
+            value = match.group(1)
+            if value.startswith('"'):
+                body["msg"] = json.loads(value)
+            else:
+                body["msg"] = value
+    return body
 
 
 # --- HTTP clients ------------------------------------------------------------
@@ -145,40 +162,48 @@ def loki_range(base: str, query: str, start: datetime, end: datetime, limit: int
 # --- Loki: image-pull events -> images.csv + kubernetes_events.csv -----------
 
 
-def fetch_events(base: str, query: str, start: datetime, end: datetime, limit: int, token: str | None, timeout: int) -> pd.DataFrame:
+def fetch_events(
+    base: str,
+    query: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    bucket: timedelta,
+    token: str | None,
+    timeout: int,
+) -> pd.DataFrame:
     """Parse Alloy-shipped Kubernetes events into a normalized event frame."""
-    streams = loki_range(base, query, start, end, limit, token, timeout)
     rows: list[dict] = []
-    for stream in streams:
-        labels = stream.get("stream", {})
-        for ts_nano, line in stream.get("values", []):
-            reason = labels.get("reason", "")
-            pod = labels.get("involvedObject_name") or labels.get("name", "")
-            msg = labels.get("message", "")
-            # Alloy writes the event body as JSON in the log line.
-            try:
-                body = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                body = {}
-                msg = msg or line
-            reason = reason or body.get("reason", "")
-            pod = pod or body.get("involvedObject_name") or body.get("name", "")
-            msg = msg or body.get("message") or body.get("msg", "")
-            image = parse_image_ref(msg)
-            if not reason and msg:
-                reason = infer_reason(msg)
-            if not image:
-                continue
-            rows.append(
-                {
-                    "pod": pod,
-                    "image": image,
-                    "reason": reason,
-                    "timestamp": datetime.fromtimestamp(int(ts_nano) / 1e9, tz=timezone.utc),
-                    "pull_seconds": parse_pull_duration_seconds(msg) if reason.lower() == "pulled" else np.nan,
-                    "size_bytes": parse_image_size_bytes(msg) if reason.lower() == "pulled" else 0,
-                }
-            )
+    bucket_start = start
+    while bucket_start < end:
+        bucket_end = min(bucket_start + bucket, end)
+        streams = loki_range(base, query, bucket_start, bucket_end, limit, token, timeout)
+        for stream in streams:
+            labels = stream.get("stream", {})
+            for ts_nano, line in stream.get("values", []):
+                reason = labels.get("reason", "")
+                pod = labels.get("involvedObject_name") or labels.get("name", "")
+                msg = labels.get("message", "")
+                body = parse_event_body(line)
+                reason = reason or body.get("reason", "")
+                pod = pod or body.get("involvedObject_name") or body.get("name", "")
+                msg = msg or body.get("message") or body.get("msg", "") or line
+                image = parse_image_ref(msg)
+                if not reason and msg:
+                    reason = infer_reason(msg)
+                if not image:
+                    continue
+                rows.append(
+                    {
+                        "pod": pod,
+                        "image": image,
+                        "reason": reason,
+                        "timestamp": datetime.fromtimestamp(int(ts_nano) / 1e9, tz=timezone.utc),
+                        "pull_seconds": parse_pull_duration_seconds(msg) if reason.lower() == "pulled" else np.nan,
+                        "size_bytes": parse_image_size_bytes(msg) if reason.lower() == "pulled" else 0,
+                    }
+                )
+        bucket_start = bucket_end
     return pd.DataFrame(rows)
 
 
@@ -386,7 +411,7 @@ def main() -> None:
     ap.add_argument("--pod-selector", default='pod=~"runner-.*"', help="kube-state-metrics label selector for runner pods.")
     ap.add_argument(
         "--loki-query",
-        default='{job="kubernetes-events"}',
+        default='{job="kubernetes-events",reason=~"Pulling|Pulled|AlreadyPresent"}',
         help="LogQL selector for Alloy-shipped Kubernetes events.",
     )
     ap.add_argument(
@@ -397,6 +422,7 @@ def main() -> None:
     ap.add_argument("--step", type=int, default=300, help="Usage-sample resolution in seconds.")
     ap.add_argument("--default-runtime", type=float, default=180.0, help="Fallback useful runtime (s) when completion time is missing.")
     ap.add_argument("--loki-limit", type=int, default=5000, help="Max Loki log entries to fetch.")
+    ap.add_argument("--loki-bucket", default="1h", help="Loki query window per request.")
     ap.add_argument("--token", help="Bearer token for both APIs (or set FETCH_TOKEN).")
     ap.add_argument("--timeout", type=int, default=60, help="Per-request timeout in seconds.")
     ap.add_argument("--out", default="data", help="Output directory for the CSVs.")
@@ -406,6 +432,9 @@ def main() -> None:
 
     end = parse_time(args.end, datetime.now(timezone.utc))
     lookback_td = pd.Timedelta(args.lookback).to_pytimedelta()
+    loki_bucket = pd.Timedelta(args.loki_bucket).to_pytimedelta()
+    if loki_bucket <= timedelta(0):
+        raise SystemExit("--loki-bucket must be greater than zero")
     start = parse_time(args.start, end - lookback_td)
 
     out = Path(args.out)
@@ -414,7 +443,7 @@ def main() -> None:
     print(f"Window: {start.isoformat()} -> {end.isoformat()}", file=sys.stderr)
 
     print("Fetching image-pull events from Loki ...", file=sys.stderr)
-    events = fetch_events(args.loki_url, args.loki_query, start, end, args.loki_limit, token, args.timeout)
+    events = fetch_events(args.loki_url, args.loki_query, start, end, args.loki_limit, loki_bucket, token, args.timeout)
     print(f"  parsed {len(events)} events", file=sys.stderr)
     events.to_csv(out / "kubernetes_events.csv", index=False)
 

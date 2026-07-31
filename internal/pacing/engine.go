@@ -10,9 +10,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Decision represents whether a new pull is allowed.
+// Decision reports how many new pull Pods may start now for one image and, when
+// none may start yet, a hint for when to requeue.
 type Decision struct {
-	Allowed   bool
+	// Slots is the number of new pull Pods that may be created now for the image.
+	Slots int
+	// RequeueIn is a requeue hint used when Slots == 0 but the image still needs pulls.
 	RequeueIn time.Duration
 }
 
@@ -27,17 +30,37 @@ func NewEngine(c client.Client, podNamespace string) *Engine {
 	return &Engine{Client: c, PodNamespace: podNamespace}
 }
 
-// CanStartPull checks pacing constraints and returns whether a new pull can start.
-func (e *Engine) CanStartPull(ctx context.Context, policy *v1alpha1.PullPolicy, cachedImageName string) (Decision, error) {
-	maxConcurrent := int32(1)
-	minDelay := 10 * time.Second
+const (
+	defaultMaxConcurrentNodes = int32(1)
+	defaultMinDelay           = 10 * time.Second
+	// requeueWhenSaturated is the requeue delay used when a concurrency cap is hit.
+	requeueWhenSaturated = 5 * time.Second
+)
+
+// PullSlots evaluates pacing constraints and returns how many new pull Pods may
+// start now for the given CachedImage.
+//
+// Semantics:
+//   - maxConcurrentNodes caps simultaneous pulls for THIS image (per-image fan-out).
+//   - minDelayBetweenPulls staggers successive waves of starts for THIS image.
+//   - maxConcurrentPulls caps the TOTAL pull Pods across all images (global valve).
+//
+// On the first wave for an image, up to maxConcurrentNodes pulls may start at
+// once; subsequent waves wait at least minDelayBetweenPulls.
+func (e *Engine) PullSlots(ctx context.Context, policy *v1alpha1.PullPolicy, cachedImageName string) (Decision, error) {
+	maxConcurrentNodes := defaultMaxConcurrentNodes
+	minDelay := defaultMinDelay
+	var maxConcurrentPulls int32 // 0 = unlimited
 
 	if policy != nil {
 		if policy.Spec.MaxConcurrentNodes > 0 {
-			maxConcurrent = policy.Spec.MaxConcurrentNodes
+			maxConcurrentNodes = policy.Spec.MaxConcurrentNodes
 		}
 		if policy.Spec.MinDelayBetweenPulls.Duration > 0 {
 			minDelay = policy.Spec.MinDelayBetweenPulls.Duration
+		}
+		if policy.Spec.MaxConcurrentPulls != nil && *policy.Spec.MaxConcurrentPulls > 0 {
+			maxConcurrentPulls = *policy.Spec.MaxConcurrentPulls
 		}
 	}
 
@@ -55,55 +78,57 @@ func (e *Engine) CanStartPull(ctx context.Context, policy *v1alpha1.PullPolicy, 
 		return Decision{}, err
 	}
 
-	// Filter to active pods (Pending or Running) and optionally scope by node selector
-	var activePods []corev1.Pod
+	// Count active pods globally and for this image, tracking the most recent
+	// start time for this image (used for the per-image wave stagger).
+	var (
+		imageActive     int32
+		globalActive    int32
+		imageMostRecent time.Time
+	)
 	for i := range podList.Items {
 		pod := &podList.Items[i]
-		if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning {
-			// Skip pods stuck in image pull errors — they're about to be cleaned up
-			if isStuckImagePull(pod) {
-				continue
+		if pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		// Skip pods stuck in image pull errors — they're about to be cleaned up.
+		if isStuckImagePull(pod) {
+			continue
+		}
+		globalActive++
+		if pod.Labels[podbuilder.LabelCachedImage] == cachedImageName {
+			imageActive++
+			if created := pod.CreationTimestamp.Time; created.After(imageMostRecent) {
+				imageMostRecent = created
 			}
-			if policy != nil && len(policy.Spec.NodeSelector) > 0 {
-				if !nodeMatchesSelector(pod.Spec.NodeName, policy.Spec.NodeSelector) {
-					continue
-				}
-			}
-			activePods = append(activePods, *pod)
 		}
 	}
 
-	// Check concurrent limit
-	if int32(len(activePods)) >= maxConcurrent {
-		return Decision{Allowed: false, RequeueIn: 5 * time.Second}, nil
+	// Per-image fan-out cap.
+	perImageRemaining := maxConcurrentNodes - imageActive
+	if perImageRemaining <= 0 {
+		return Decision{Slots: 0, RequeueIn: requeueWhenSaturated}, nil
 	}
 
-	// Check minimum delay between pulls
-	var mostRecent time.Time
-	for i := range activePods {
-		created := activePods[i].CreationTimestamp.Time
-		if created.After(mostRecent) {
-			mostRecent = created
+	// Global total cap (bandwidth valve). When unset, only the per-image cap applies.
+	slots := perImageRemaining
+	if maxConcurrentPulls > 0 {
+		globalRemaining := maxConcurrentPulls - globalActive
+		if globalRemaining <= 0 {
+			return Decision{Slots: 0, RequeueIn: requeueWhenSaturated}, nil
+		}
+		if globalRemaining < slots {
+			slots = globalRemaining
 		}
 	}
 
-	if !mostRecent.IsZero() {
-		elapsed := time.Since(mostRecent)
-		if elapsed < minDelay {
-			remaining := minDelay - elapsed
-			return Decision{Allowed: false, RequeueIn: remaining}, nil
+	// Per-image stagger between successive waves.
+	if !imageMostRecent.IsZero() {
+		if elapsed := time.Since(imageMostRecent); elapsed < minDelay {
+			return Decision{Slots: 0, RequeueIn: minDelay - elapsed}, nil
 		}
 	}
 
-	return Decision{Allowed: true}, nil
-}
-
-// nodeMatchesSelector is a simplified check.
-// In a real implementation, we'd look up the node's labels.
-// For now, this always returns true since drop Pods are already placed
-// on specific nodes via nodeName — the pacing scope is informational.
-func nodeMatchesSelector(_ string, _ map[string]string) bool {
-	return true
+	return Decision{Slots: int(slots)}, nil
 }
 
 // isStuckImagePull returns true if a pod has a container waiting due to image pull failure.

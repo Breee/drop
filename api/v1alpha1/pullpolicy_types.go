@@ -15,14 +15,29 @@ import (
 // PullPolicySpec defines pacing and behavior configuration for image pulls.
 // A PullPolicy is referenced by CachedImage or CachedImageSet via policyRef.
 type PullPolicySpec struct {
-	// MaxConcurrentNodes is the maximum number of nodes pulling simultaneously for images
-	// that reference this policy. Increase for large clusters; keep low for bandwidth-constrained nodes.
-	// Default: 1. Example: 3 (pull on up to 3 nodes at once)
+	// MaxConcurrentNodes is the maximum number of Pods pulling a SINGLE image
+	// simultaneously — the fan-out of one image across its target nodes. Different
+	// images pull independently in parallel (bounded by MaxConcurrentPulls). drop
+	// may start up to this many pulls for an image in one pass, then staggers
+	// further waves via MinDelayBetweenPulls. Increase for faster per-image rollout
+	// on large clusters; keep low for bandwidth-constrained nodes.
+	// Default: 1. Example: 3 (pull one image on up to 3 nodes at once)
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	MaxConcurrentNodes int32 `json:"maxConcurrentNodes,omitempty"`
-	// MinDelayBetweenPulls is the minimum wait time between starting a pull on one node and
-	// starting the next pull on another node. Prevents burst traffic to the registry.
+	// MaxConcurrentPulls is a global cap on the TOTAL number of pull Pods running
+	// simultaneously across ALL images that reference this policy. It is a
+	// cluster-wide bandwidth valve, independent of the per-image MaxConcurrentNodes
+	// fan-out. Unset or zero means unlimited (only the per-image cap applies).
+	// Example: 20
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentPulls *int32 `json:"maxConcurrentPulls,omitempty"`
+	// MinDelayBetweenPulls is the minimum wait between successive waves of pull
+	// starts for the SAME image. drop may start up to MaxConcurrentNodes pulls for
+	// an image at once, then waits at least this long before starting more for that
+	// image. Applied per image, not globally, so different images are not throttled
+	// against each other. Prevents a tight loop of new Pods.
 	// Default: "10s". Example: "30s", "1m"
 	// +kubebuilder:default="10s"
 	MinDelayBetweenPulls metav1.Duration `json:"minDelayBetweenPulls,omitempty"`
@@ -61,6 +76,7 @@ type BackoffConfig struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,categories=drop
 // +kubebuilder:printcolumn:name="MaxNodes",type=integer,JSONPath=`.spec.maxConcurrentNodes`
+// +kubebuilder:printcolumn:name="MaxPulls",type=integer,JSONPath=`.spec.maxConcurrentPulls`
 // +kubebuilder:printcolumn:name="MinDelay",type=string,JSONPath=`.spec.minDelayBetweenPulls`
 // +kubebuilder:printcolumn:name="RepullInterval",type=string,JSONPath=`.spec.repullInterval`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

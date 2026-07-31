@@ -508,22 +508,37 @@ func (r *CachedImageReconciler) schedulePulls(ctx context.Context, ci *dropv1alp
 		}
 	}
 
+	// Determine how many new pulls may start this reconcile for this image.
+	decision, err := r.PacingEngine.PullSlots(ctx, policy, ci.Name)
+	if err != nil {
+		return 0, false, fmt.Errorf("checking pacing: %w", err)
+	}
+
+	if decision.Slots <= 0 {
+		// A concurrency cap or the wave stagger is active — requeue and retry.
+		if decision.RequeueIn > requeueAfter {
+			requeueAfter = decision.RequeueIn
+		}
+		// Only request a requeue if some node still needs a pull.
+		for _, state := range stateMap {
+			if !state.ready && state.pod == nil && !state.failed {
+				requeueNeeded = true
+				break
+			}
+		}
+		return requeueAfter, requeueNeeded, nil
+	}
+
+	// Create up to `Slots` pods this reconcile (per-image fan-out wave).
+	created := 0
 	for nodeName, state := range stateMap {
 		if state.ready || state.pod != nil || state.failed {
 			continue
 		}
-
-		decision, err := r.PacingEngine.CanStartPull(ctx, policy, ci.Name)
-		if err != nil {
-			return 0, false, fmt.Errorf("checking pacing: %w", err)
-		}
-
-		if !decision.Allowed {
-			if decision.RequeueIn > requeueAfter {
-				requeueAfter = decision.RequeueIn
-			}
+		if created >= decision.Slots {
+			// More nodes need this image but the wave is full — requeue.
 			requeueNeeded = true
-			continue
+			break
 		}
 
 		pod, err := podbuilder.BuildDropPod(ci, nodeName, r.PodNamespace)
@@ -542,10 +557,10 @@ func (r *CachedImageReconciler) schedulePulls(ctx context.Context, ci *dropv1alp
 			dropmetrics.ActivePulls.Inc()
 			r.Recorder.Eventf(ci, nil, corev1.EventTypeNormal, "PullStarted", "CacheImage", "Started pulling image %s on node %s", ci.Spec.Image, nodeName)
 			log.Info("created drop pod", "pod", pod.Name, "node", nodeName, "image", ci.Spec.Image)
+			created++
 		}
 
 		requeueNeeded = true
-		break // Create one pod at a time, respecting pacing
 	}
 
 	return requeueAfter, requeueNeeded, nil

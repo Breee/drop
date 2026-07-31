@@ -108,8 +108,9 @@ PullPolicy controls the pacing and retry behavior for image pulls across cluster
 #### Spec
 | Field | JSON | Type | Required | Default | Description |
 |-------|------|------|----------|---------|-------------|
-| MaxConcurrentNodes | `maxConcurrentNodes` | `int32` | — | `1` | MaxConcurrentNodes is the maximum number of nodes pulling simultaneously for images that reference this policy. Increase for large clusters; keep low for bandwidth-constrained nodes. Default: 1. Example: 3 (pull on up to 3 nodes at once) |
-| MinDelayBetweenPulls | `minDelayBetweenPulls` | `metav1.Duration` | — | `10s` | MinDelayBetweenPulls is the minimum wait time between starting a pull on one node and starting the next pull on another node. Prevents burst traffic to the registry. Default: "10s". Example: "30s", "1m" |
+| MaxConcurrentNodes | `maxConcurrentNodes` | `int32` | — | `1` | MaxConcurrentNodes is the maximum number of Pods pulling a SINGLE image simultaneously — the fan-out of one image across its target nodes. Different images pull independently in parallel (bounded by MaxConcurrentPulls). drop may start up to this many pulls for an image in one pass, then staggers further waves via MinDelayBetweenPulls. Increase for faster per-image rollout on large clusters; keep low for bandwidth-constrained nodes. Default: 1. Example: 3 (pull one image on up to 3 nodes at once) |
+| MaxConcurrentPulls | `maxConcurrentPulls` | `*int32` | — |  | MaxConcurrentPulls is a global cap on the TOTAL number of pull Pods running simultaneously across ALL images that reference this policy. It is a cluster-wide bandwidth valve, independent of the per-image MaxConcurrentNodes fan-out. Unset or zero means unlimited (only the per-image cap applies). Example: 20 |
+| MinDelayBetweenPulls | `minDelayBetweenPulls` | `metav1.Duration` | — | `10s` | MinDelayBetweenPulls is the minimum wait between successive waves of pull starts for the SAME image. drop may start up to MaxConcurrentNodes pulls for an image at once, then waits at least this long before starting more for that image. Applied per image, not globally, so different images are not throttled against each other. Prevents a tight loop of new Pods. Default: "10s". Example: "30s", "1m" |
 | FailureBackoff | `failureBackoff` | `*BackoffConfig` | — |  | FailureBackoff configures exponential retry delays when a pull fails. If unset, defaults to initial=30s, max=5m. |
 | RepullInterval | `repullInterval` | `*metav1.Duration` | — |  | RepullInterval defines how often to re-pull already-cached images to pick up digest changes. Unset or zero means never re-pull (rely on imagePullPolicy=Always on the CachedImage instead). Example: "24h" (re-pull daily), "6h" |
 | NodeSelector | `nodeSelector` | `map[string]string` | — |  | NodeSelector scopes this policy to a specific node pool. Only relevant when the same PullPolicy should only pace pulls on a subset of nodes. Example: {"node-role.kubernetes.io/build": "true"} |
@@ -675,14 +676,12 @@ spec:
       type: eventPullTime
       eventPullTime:
         statistic: p50
-        durationMode: messageDuration
     - name: avg-image-size
       query: image-pull-events
       type: eventPullTime
       eventPullTime:
         metric: imageSize
         statistic: avg
-        durationMode: messageDuration
   ranking:
     strategy: signal
     signal: p50-cold-pull-time
@@ -759,8 +758,6 @@ spec:
       type: eventPullTime
       eventPullTime:
         statistic: p50
-        durationMode: messageDuration
-        includeCacheHits: false
   ranking:
     strategy: modelExposure
     modelExposure:
