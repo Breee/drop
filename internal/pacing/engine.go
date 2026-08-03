@@ -21,13 +21,17 @@ type Decision struct {
 
 // Engine evaluates pacing constraints before creating new drop Pods.
 type Engine struct {
-	Client       client.Client
+	// Reader is used to list active pull Pods. It must bypass the informer cache
+	// (e.g. mgr.GetAPIReader()) so that pods created in the current reconcile
+	// cycle are visible to subsequent reconciles before the cache is updated.
+	Reader       client.Reader
 	PodNamespace string
 }
 
-// NewEngine creates a new pacing engine.
-func NewEngine(c client.Client, podNamespace string) *Engine {
-	return &Engine{Client: c, PodNamespace: podNamespace}
+// NewEngine creates a new pacing engine. reader should be a direct API-server
+// reader (mgr.GetAPIReader()) to avoid stale cache reads when counting active pods.
+func NewEngine(reader client.Reader, podNamespace string) *Engine {
+	return &Engine{Reader: reader, PodNamespace: podNamespace}
 }
 
 const (
@@ -74,7 +78,7 @@ func (e *Engine) PullSlots(ctx context.Context, policy *v1alpha1.PullPolicy, cac
 		client.InNamespace(ns),
 		client.MatchingLabels{podbuilder.LabelManagedBy: podbuilder.LabelManagedByValue},
 	}
-	if err := e.Client.List(ctx, podList, listOpts...); err != nil {
+	if err := e.Reader.List(ctx, podList, listOpts...); err != nil {
 		return Decision{}, err
 	}
 
