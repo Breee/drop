@@ -222,7 +222,7 @@ func main() {
 	if err = (&controller.CachedImageReconciler{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
-		PacingEngine: pacing.NewEngine(mgr.GetClient(), podNamespace),
+		PacingEngine: pacing.NewEngine(mgr.GetAPIReader(), podNamespace),
 		Recorder:     mgr.GetEventRecorder("cachedimage-controller"),
 		PodNamespace: podNamespace,
 	}).SetupWithManager(mgr); err != nil {
