@@ -9,9 +9,12 @@ linters:
     - copyloopvar
     - dupl
     - errcheck
+    - fatcontext
     - ginkgolinter
     - goconst
+    - gocritic
     - gocyclo
+    - gosec
     - govet
     - ineffassign
     - lll
@@ -29,6 +32,11 @@ linters:
         - name: comment-spacings
     goconst:
       min-occurrences: 5
+    gosec:
+      # G115 flags every len()/Hour() -> int32 conversion; node/tag/hour counts
+      # never approach int32 max, so these are false positives.
+      excludes:
+        - G115
   exclusions:
     presets: []
     rules:
@@ -44,13 +52,22 @@ linters:
           - lll
           - goconst
           - staticcheck
+          # Build-time doc generator: reads/writes local files by path by design.
+          - gosec
+          - gocritic
       - path: "_test\\.go"
         linters:
           - goconst
+          - gosec
+          - gocritic
+          - fatcontext
       - path: "test/*"
         linters:
           - goconst
           - staticcheck
+          # E2E helpers legitimately shell out to kubectl/make.
+          - gosec
+          - gocritic
       - path: "internal/metrics/*"
         linters:
           - goconst

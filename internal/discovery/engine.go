@@ -107,12 +107,13 @@ func ExecutePipeline(
 					"signal %q type=%s is not compatible with query %q type=%s",
 					sig.Name, sig.Type, sig.Query, raw.QueryType,
 				)
-				if qResults[idx].Status == dropv1alpha1.QueryResultStatusSuccess {
+				switch {
+				case qResults[idx].Status == dropv1alpha1.QueryResultStatusSuccess:
 					qResults[idx].Status = dropv1alpha1.QueryResultStatusFailed
 					qResults[idx].Message = msg
-				} else if qResults[idx].Message == "" {
+				case qResults[idx].Message == "":
 					qResults[idx].Message = msg
-				} else {
+				default:
 					qResults[idx].Message = qResults[idx].Message + "; " + msg
 				}
 			}

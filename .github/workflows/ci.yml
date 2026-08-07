@@ -12,12 +12,13 @@ permissions:
   contents: read
 
 # Each job maps to a local make target for easy debugging:
-#   lint       → make lint
-#   test       → make test
-#   build      → make build
-#   helm-lint  → make helm-lint && make helm-template
-#   docs-build → make docs-build
-#   e2e        → make e2e-local
+#   lint        → make lint
+#   test        → make test
+#   build       → make build
+#   govulncheck → make govulncheck
+#   helm-lint   → make helm-lint && make helm-template
+#   docs-build  → make docs-build
+#   e2e         → make e2e-local
 
 jobs:
   lint:
@@ -40,6 +41,16 @@ jobs:
           go-version-file: go.mod
       - name: Run tests
         run: make test
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Scan for known vulnerabilities
+        run: make govulncheck
 
   build:
     runs-on: ubuntu-latest
@@ -96,7 +107,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version-file: go.mod
           cache: false
       - name: Setup Hugo
         uses: peaceiris/actions-hugo@v3

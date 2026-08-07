@@ -47,6 +47,10 @@ lint: golangci-lint ## Run golangci-lint.
 lint-fix: golangci-lint ## Run golangci-lint with auto-fix.
 	$(GOLANGCI_LINT) run --fix
 
+.PHONY: govulncheck
+govulncheck: govulncheck-tool ## Scan dependencies for known vulnerabilities.
+	$(GOVULNCHECK) ./...
+
 ##@ Code Generation
 
 .PHONY: generate
@@ -247,6 +251,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 CHAINSAW ?= $(LOCALBIN)/chainsaw
+GOVULNCHECK ?= $(LOCALBIN)/govulncheck
 
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.17.2
@@ -254,6 +259,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.12.2
 CHAINSAW_VERSION ?= v0.2.15
+GOVULNCHECK_VERSION ?= v1.6.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE)
@@ -279,6 +285,11 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 chainsaw: $(CHAINSAW)
 $(CHAINSAW): $(LOCALBIN)
 	$(call go-install-tool,$(CHAINSAW),github.com/kyverno/chainsaw,$(CHAINSAW_VERSION))
+
+.PHONY: govulncheck-tool
+govulncheck-tool: $(GOVULNCHECK)
+$(GOVULNCHECK): $(LOCALBIN)
+	$(call go-install-tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
 
 define go-install-tool
 @[ -f "$(1)-$(3)" ] || { \
