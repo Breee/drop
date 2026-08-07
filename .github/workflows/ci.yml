@@ -135,10 +135,21 @@ jobs:
           sudo mv ./kind /usr/local/bin/kind
       - name: Create kind cluster
         run: make kind-create KIND=kind
-      - name: Build and load image
-        run: |
-          make docker-build IMG=controller:ci
-          make kind-load KIND=kind IMG=controller:ci
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build image (reusing docker-build layer cache)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: controller:ci
+          cache-from: |
+            type=gha,scope=drop-image
+            type=gha,scope=drop-image-e2e
+          cache-to: type=gha,scope=drop-image-e2e,mode=max,ignore-error=true
+          provenance: false
+      - name: Load image into kind
+        run: kind load docker-image controller:ci --name drop-dev
       - name: Install CRDs
         run: |
           make controller-gen
