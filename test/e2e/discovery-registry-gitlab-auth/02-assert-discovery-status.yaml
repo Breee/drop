@@ -1,0 +1,17 @@
+# Assert the anonymous bearer-token auth flow against the real GitLab registry
+# succeeded:
+# - Ready=True / Synced (proves the 401 challenge was handled, not Unauthorized)
+# - Exactly 2 images kept (topX=2)
+# Specific tags are intentionally NOT asserted: the newest gitlab-runner-helper
+# releases change over time. The auth flow and ranking are covered by unit tests
+# (internal/discovery/registry_test.go); this test proves it works end-to-end
+# against the live registry.
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: e2e-discovery-registry-gitlab-auth
+status:
+  (conditions[?type == 'Ready']):
+    - status: "True"
+      reason: Synced
+  imageCount: 2

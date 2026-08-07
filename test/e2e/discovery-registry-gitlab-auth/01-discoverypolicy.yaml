@@ -1,0 +1,24 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: e2e-discovery-registry-gitlab-auth
+spec:
+  queries:
+    - name: helper-tags
+      type: registry
+      # Real GitLab container registry. Public repo, but the registry still
+      # answers /v2/.../tags/list with 401 + a Bearer challenge, so this
+      # exercises the anonymous OCI token flow end-to-end.
+      registry:
+        url: "https://registry.gitlab.com"
+        repositories:
+          - gitlab-org/gitlab-runner/gitlab-runner-helper
+        # Only plain x86_64 semver releases (excludes -latest, arch/flavor variants)
+        tagFilter: "^x86_64-v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        versionPattern: "x86_64-v(.+)"
+        # Skip the tens of thousands of digest/flavor tags that sort before x86_64-v*
+        tagSeek: "x86_64-u~"
+        maxScan: 5000
+        topX: 2
+  syncInterval: 1h
+  maxImages: 10

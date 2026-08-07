@@ -144,6 +144,71 @@ func TestRegistrySource_Pagination(t *testing.T) {
 	}
 }
 
+// TestRegistrySource_BearerAuth verifies the anonymous OCI token flow used by
+// registries like GitLab: the tags endpoint answers 401 with a Bearer challenge
+// pointing at a token realm; the source must fetch an anonymous token from that
+// realm and retry with an Authorization header.
+func TestRegistrySource_BearerAuth(t *testing.T) {
+	repo := "gitlab-org/gitlab-runner/gitlab-runner-helper"
+	const wantToken = "anon-token-123"
+
+	var registry *httptest.Server
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("service"); got != "container_registry" {
+			t.Errorf("token request service = %q, want container_registry", got)
+		}
+		if got := r.URL.Query().Get("scope"); got != "repository:"+repo+":pull" {
+			t.Errorf("token request scope = %q, want repository:%s:pull", got, repo)
+		}
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]string{"token": wantToken}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer tokenServer.Close()
+
+	var tokenRequests, tagRequests int
+	registry = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tagRequests++
+		if r.Header.Get("Authorization") != "Bearer "+wantToken {
+			w.Header().Set("Www-Authenticate",
+				`Bearer realm="`+tokenServer.URL+`",service="container_registry",scope="repository:`+repo+`:pull"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}`))
+			tokenRequests++
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(tagListResponse{
+			Name: repo,
+			Tags: []string{"x86_64-v18.5.0", "x86_64-v19.0.0"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer registry.Close()
+
+	source := NewRegistrySource(registry.URL, []string{repo}, `^x86_64-v`, "", 0, 0, "", "x86_64-v(.+)", registry.Client())
+	results, err := source.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d: %v", len(results), results)
+	}
+	host := registry.URL[len("http://"):]
+	if results[0].Image != host+"/"+repo+":x86_64-v19.0.0" {
+		t.Errorf("expected x86_64-v19.0.0 first, got %s", results[0].Image)
+	}
+	if tokenRequests != 1 {
+		t.Errorf("expected exactly one 401 challenge, got %d", tokenRequests)
+	}
+	if tagRequests != 2 {
+		t.Errorf("expected one challenged + one authorized tag request, got %d", tagRequests)
+	}
+}
+
 func TestSortTagsNewestFirst(t *testing.T) {
 	tests := []struct {
 		name string

@@ -102,13 +102,9 @@ func (rs *RegistrySource) listTags(ctx context.Context, repo string) ([]string, 
 	next := fmt.Sprintf("%s/v2/%s/tags/list?%s", rs.URL, repo, q.Encode())
 
 	var tags []string
+	var token string
 	for next != "" && len(tags) < budget {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
-		if err != nil {
-			return nil, fmt.Errorf("creating request: %w", err)
-		}
-
-		resp, err := rs.HTTPClient.Do(req)
+		resp, err := rs.authorizedGet(ctx, next, &token)
 		if err != nil {
 			return nil, fmt.Errorf("listing tags: %w", err)
 		}
@@ -135,6 +131,125 @@ func (rs *RegistrySource) listTags(ctx context.Context, repo string) ([]string, 
 		tags = tags[:budget]
 	}
 	return tags, nil
+}
+
+// tokenResponse models the OCI token endpoint reply. Registries return the
+// bearer token under "token" and/or "access_token".
+type tokenResponse struct {
+	Token       string `json:"token"`
+	AccessToken string `json:"access_token"`
+}
+
+// authorizedGet performs a GET and, if the registry answers with a 401 Bearer
+// challenge, transparently obtains an anonymous token from the challenge realm
+// and retries once. The token is cached in *token for reuse across paginated
+// requests. Registries like GitLab require a bearer token even for anonymous
+// pulls of public repositories.
+func (rs *RegistrySource) authorizedGet(ctx context.Context, urlStr string, token *string) (*http.Response, error) {
+	resp, err := rs.rawGet(ctx, urlStr, *token)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+
+	challenge := resp.Header.Get("Www-Authenticate")
+	_ = resp.Body.Close()
+	newToken, err := rs.fetchBearerToken(ctx, challenge)
+	if err != nil {
+		return nil, err
+	}
+	if newToken == "" {
+		// Not a bearer challenge we can satisfy; re-issue so the caller sees the 401 body.
+		return rs.rawGet(ctx, urlStr, *token)
+	}
+	*token = newToken
+	return rs.rawGet(ctx, urlStr, newToken)
+}
+
+// rawGet issues a single GET, attaching a bearer token when one is provided.
+func (rs *RegistrySource) rawGet(ctx context.Context, urlStr, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return rs.HTTPClient.Do(req)
+}
+
+// fetchBearerToken parses a Www-Authenticate Bearer challenge and requests an
+// anonymous token from its realm. Returns "" when the header is not a Bearer
+// challenge or carries no realm.
+func (rs *RegistrySource) fetchBearerToken(ctx context.Context, challenge string) (string, error) {
+	realm, params := parseBearerChallenge(challenge)
+	if realm == "" {
+		return "", nil
+	}
+
+	u, err := url.Parse(realm)
+	if err != nil {
+		return "", fmt.Errorf("parsing token realm: %w", err)
+	}
+	q := u.Query()
+	if svc := params["service"]; svc != "" {
+		q.Set("service", svc)
+	}
+	if scope := params["scope"]; scope != "" {
+		q.Set("scope", scope)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("creating token request: %w", err)
+	}
+	resp, err := rs.HTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("requesting token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tr tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return "", fmt.Errorf("decoding token response: %w", err)
+	}
+	if tr.Token != "" {
+		return tr.Token, nil
+	}
+	return tr.AccessToken, nil
+}
+
+// parseBearerChallenge parses an RFC 6750 "Bearer" Www-Authenticate header,
+// returning the realm and the remaining directives (service, scope, ...). The
+// realm is empty when the scheme is not Bearer.
+func parseBearerChallenge(header string) (realm string, params map[string]string) {
+	params = map[string]string{}
+	const prefix = "Bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return "", params
+	}
+	for _, part := range strings.Split(header[len(prefix):], ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		if key == "realm" {
+			realm = val
+		} else {
+			params[key] = val
+		}
+	}
+	return realm, params
 }
 
 // nextPageURL parses an RFC 5988 `Link` header and returns the absolute URL of
