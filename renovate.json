@@ -22,6 +22,12 @@
       "groupName": "drop-charts"
     },
     {
+      "description": "Group all Go version bumps (go directive, toolchain, golang Docker image) into a single PR",
+      "groupName": "golang",
+      "matchDatasources": ["golang-version", "docker"],
+      "matchPackageNames": ["go", "golang", "docker.io/golang"]
+    },
+    {
       "description": "Enable updates for transitive (indirect) Go dependencies",
       "matchManagers": ["gomod"],
       "matchDepTypes": ["indirect"],
