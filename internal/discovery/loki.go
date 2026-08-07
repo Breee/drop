@@ -90,7 +90,10 @@ func (l *LokiSource) FetchRaw(ctx context.Context) (map[string][]TimedSample, er
 	if err != nil {
 		return nil, fmt.Errorf("parsing endpoint: %w", err)
 	}
-	u.Path = "/loki/api/v1/query_range"
+	u.Path, err = url.JoinPath(u.Path, "/loki/api/v1/query_range")
+	if err != nil {
+		return nil, fmt.Errorf("building query URL: %w", err)
+	}
 
 	lookback := l.Lookback
 	if lookback == 0 {

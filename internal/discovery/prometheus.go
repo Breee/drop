@@ -76,14 +76,20 @@ func (p *PrometheusSource) Fetch(ctx context.Context) ([]ImageResult, error) {
 
 	if p.QueryType == dropv1alpha1.QueryTypeRange {
 		// Range query: aggregate over time window
-		u.Path = "/api/v1/query_range"
+		u.Path, err = url.JoinPath(u.Path, "/api/v1/query_range")
+		if err != nil {
+			return nil, fmt.Errorf("building query URL: %w", err)
+		}
 		now := time.Now().UTC()
 		q.Set("start", now.Add(-p.Lookback).Format(time.RFC3339))
 		q.Set("end", now.Format(time.RFC3339))
 		q.Set("step", fmt.Sprintf("%ds", int(p.Step.Seconds())))
 	} else {
 		// Instant query: single point in time
-		u.Path = "/api/v1/query"
+		u.Path, err = url.JoinPath(u.Path, "/api/v1/query")
+		if err != nil {
+			return nil, fmt.Errorf("building query URL: %w", err)
+		}
 	}
 	u.RawQuery = q.Encode()
 

@@ -322,6 +322,42 @@ spec:
 ```
 Supported Secret keys: `token`, `username`, `password`, `ca.crt`, `tls.crt`, `tls.key`, `headers.<name>`.
 
+#### Grafana Mimir
+
+Mimir is a common Prometheus backend and needs two adjustments:
+
+1. **Base path** — Mimir serves the Prometheus API under `/prometheus`, so the
+   endpoint must include it: `https://mimir.example.com/prometheus`. Drop appends
+   `/api/v1/query_range` to whatever path you provide. Omitting `/prometheus`
+   yields a `404 Not Found` (often an nginx HTML page) from the gateway.
+2. **Tenant header** — multi-tenant Mimir requires the `X-Scope-OrgID` header to
+   select a tenant. Provide it via `secretRef` using a `headers.X-Scope-OrgID`
+   key. Single-tenant deployments (anonymous auth) can skip this.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mimir-creds
+  namespace: drop-system
+stringData:
+  headers.X-Scope-OrgID: my-tenant   # required for multi-tenant Mimir
+---
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: mimir-example
+spec:
+  queries:
+    - name: runner-image-usage
+      type: prometheus
+      prometheus:
+        endpoint: https://mimir.example.com/prometheus   # note the /prometheus base path
+        query: ...
+      secretRef:
+        name: mimir-creds
+```
+
 ## Stage 2 — Signals
 
 A signal derives a named per-image value from exactly one query. The four types reduce the same panel differently:

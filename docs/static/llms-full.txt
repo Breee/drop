@@ -173,7 +173,7 @@ DiscoveryPrometheusQuery defines the Prometheus-specific query parameters. The P
 
 | Field | JSON | Type | Required | Default | Description |
 |-------|------|------|----------|---------|-------------|
-| Endpoint | `endpoint` | `string` | ✓ |  | Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com" |
+| Endpoint | `endpoint` | `string` | ✓ |  | Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Include any base path the backend serves its API under; Drop appends /api/v1/query[_range]. Grafana Mimir serves under /prometheus, e.g. "https://mimir.example.com/prometheus". Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com/prometheus" |
 | Query | `query` | `string` | ✓ |  | Query is the PromQL expression. Must return results with an "image" label. Example: count(container_memory_working_set_bytes{namespace="gitlab-runner"}) by (image) |
 | QueryType | `queryType` | `QueryType` | — | `range` | QueryType controls how the query is executed: "range" or "instant". Default: "range". |
 | Lookback | `lookback` | `*metav1.Duration` | — |  | Lookback is the time window for range queries (start=now-lookback, end=now). Required when queryType is "range". Ignored when queryType is "instant". Example: "168h" (7 days), "24h", "72h" |
@@ -384,7 +384,7 @@ graph LR
 | Pulling | CachedImage | Actively pulling on N node(s), N/N complete |  |
 | Stalled | CachedImage | Pull stalled: N/N nodes ready, retrying with backoff |  |
 | Degraded | CachedImageSet | N/N images cached, failing: N |  |
-| Progressing | CachedImageSet | N/N images cached |  |
+| Progressing | CachedImageSet |  |  |
 | Ready | CachedImageSet | All N images are cached |  |
 | ConnectionRefused | DiscoveryPolicy |  |  |
 | DNSError | DiscoveryPolicy |  |  |
@@ -855,6 +855,7 @@ spec:
   make vet	# Run go vet.
   make lint	# Run golangci-lint.
   make lint-fix	# Run golangci-lint with auto-fix.
+  make govulncheck	# Scan dependencies for known vulnerabilities.
   make generate	# Generate DeepCopy methods.
   make manifests	# Generate CRD and RBAC manifests.
   make sync-crds	# Sync generated CRDs into Helm chart templates.

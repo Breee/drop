@@ -153,7 +153,9 @@ const (
 // The PromQL result MUST carry an "image" label; that label value is the image reference.
 type DiscoveryPrometheusQuery struct {
 	// Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics).
-	// Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com"
+	// Include any base path the backend serves its API under; Drop appends /api/v1/query[_range].
+	// Grafana Mimir serves under /prometheus, e.g. "https://mimir.example.com/prometheus".
+	// Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com/prometheus"
 	// +kubebuilder:validation:MinLength=1
 	Endpoint string `json:"endpoint"`
 	// Query is the PromQL expression. Must return results with an "image" label.

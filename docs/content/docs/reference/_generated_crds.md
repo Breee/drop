@@ -199,7 +199,7 @@ DiscoveryPrometheusQuery defines the Prometheus-specific query parameters. The P
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `endpoint` | `string` | Yes | — | Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com" |
+| `endpoint` | `string` | Yes | — | Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Include any base path the backend serves its API under; Drop appends /api/v1/query[_range]. Grafana Mimir serves under /prometheus, e.g. "https://mimir.example.com/prometheus". Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com/prometheus" |
 | `query` | `string` | Yes | — | Query is the PromQL expression. Must return results with an "image" label. Example: count(container_memory_working_set_bytes{namespace="gitlab-runner"}) by (image) |
 | `queryType` | `QueryType` | No | range | QueryType controls how the query is executed: "range" or "instant". Default: "range". |
 | `lookback` | `*metav1.Duration` | No | — | Lookback is the time window for range queries (start=now-lookback, end=now). Required when queryType is "range". Ignored when queryType is "instant". Example: "168h" (7 days), "24h", "72h" |

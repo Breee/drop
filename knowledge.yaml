@@ -445,7 +445,7 @@ helperTypes:
         json: endpoint
         type: string
         required: true
-        doc: 'Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com"'
+        doc: 'Endpoint is the Prometheus-compatible API URL (Prometheus, Thanos, Mimir, VictoriaMetrics). Include any base path the backend serves its API under; Drop appends /api/v1/query[_range]. Grafana Mimir serves under /prometheus, e.g. "https://mimir.example.com/prometheus". Example: "http://prometheus.monitoring.svc:9090", "https://mimir.example.com/prometheus"'
       - name: Query
         json: query
         type: string
@@ -971,7 +971,7 @@ errors:
     meaning: 'N/N images cached, failing: N'
   - reason: Progressing
     controller: CachedImageSet
-    meaning: N/N images cached
+    meaning: ""
   - reason: Ready
     controller: CachedImageSet
     meaning: All N images are cached
@@ -1033,6 +1033,8 @@ makeTargets:
     desc: Run golangci-lint.
   - name: lint-fix
     desc: Run golangci-lint with auto-fix.
+  - name: govulncheck
+    desc: Scan dependencies for known vulnerabilities.
   - name: generate
     desc: Generate DeepCopy methods.
   - name: manifests
