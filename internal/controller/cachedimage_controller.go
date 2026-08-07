@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -577,6 +578,7 @@ func (r *CachedImageReconciler) updateCachedImageStatus(ci *dropv1alpha1.CachedI
 			cachedNodes = append(cachedNodes, nodeName)
 		}
 	}
+	sort.Strings(cachedNodes)
 
 	ci.Status.ObservedGeneration = ci.Generation
 	ci.Status.NodesTargeted = nodesTargeted
