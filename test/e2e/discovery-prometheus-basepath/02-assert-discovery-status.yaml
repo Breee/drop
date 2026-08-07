@@ -1,0 +1,12 @@
+# Assert the pipeline succeeded when querying through a /prometheus base path.
+# Proves Drop appends /api/v1/query_range to the endpoint path instead of
+# replacing it (regression guard for the Mimir 404 bug).
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: e2e-discovery-basepath
+status:
+  (conditions[?type == 'Ready']):
+    - status: "True"
+      reason: Synced
+  (imageCount > `0`): true

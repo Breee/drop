@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: discovery-prometheus-basepath
+spec:
+  description: |
+    Verify that a Prometheus query against an endpoint with a base path
+    (Mimir-style /prometheus, served by the nginx proxy) succeeds. Guards the
+    regression where Drop overwrote the endpoint path and hit the gateway root
+    with a 404.
+  steps:
+    - name: Create DiscoveryPolicy pointing at the /prometheus base path
+      try:
+        - apply:
+            file: 01-discoverypolicy.yaml
+    - name: Assert pipeline executed and images were discovered
+      try:
+        - assert:
+            timeout: 120s
+            file: 02-assert-discovery-status.yaml
+    - name: Cleanup
+      try:
+        - delete:
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: DiscoveryPolicy
+              name: e2e-discovery-basepath

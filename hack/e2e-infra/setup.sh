@@ -19,6 +19,10 @@ echo "[e2e-infra] Deploying Prometheus with seed data..."
 kubectl apply -n "$NAMESPACE" -f "$SCRIPT_DIR/prometheus-config.yaml"
 kubectl apply -n "$NAMESPACE" -f "$SCRIPT_DIR/prometheus.yaml"
 
+# --- Deploy nginx proxy exposing Prometheus under a /prometheus base path ---
+echo "[e2e-infra] Deploying Prometheus proxy (root + /prometheus base path)..."
+kubectl apply -n "$NAMESPACE" -f "$SCRIPT_DIR/prometheus-proxy.yaml"
+
 # --- Deploy Loki for image-pull event discovery ---
 echo "[e2e-infra] Deploying Loki..."
 kubectl apply -n "$NAMESPACE" -f "$SCRIPT_DIR/loki.yaml"
@@ -51,6 +55,9 @@ echo "[e2e-infra] Containerd mirror configured on all nodes."
 echo "[e2e-infra] Waiting for Prometheus to be ready..."
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/prometheus --timeout=90s
 
+echo "[e2e-infra] Waiting for Prometheus proxy to be ready..."
+kubectl -n "$NAMESPACE" wait --for=condition=available deployment/prometheus-proxy --timeout=90s
+
 echo "[e2e-infra] Waiting for Loki to be ready..."
 # Loki single-binary startup can lag behind registry/prometheus in CI clusters.
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/loki --timeout=300s
@@ -79,5 +86,6 @@ kubectl -n "$NAMESPACE" wait --for=condition=complete job/seed-loki --timeout=18
 
 echo "[e2e-infra] Infrastructure ready."
 echo "  Prometheus: http://prometheus.$NAMESPACE.svc.cluster.local:9090"
+echo "  Prometheus (base path): http://prometheus-proxy.$NAMESPACE.svc.cluster.local/prometheus"
 echo "  Loki:       http://loki.$NAMESPACE.svc.cluster.local:3100"
 echo "  Registry:   http://registry.$NAMESPACE.svc.cluster.local:5000"

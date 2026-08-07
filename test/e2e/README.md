@@ -25,6 +25,7 @@ make test-e2e
 | `cachedimageset-discovery/` | CachedImageSet backed by a DiscoveryPolicy |
 | `discovery/` | DiscoveryPolicy with mock Prometheus |
 | `discovery-failure/` | DiscoveryPolicy with unreachable Prometheus endpoint |
+| `discovery-prometheus-basepath/` | DiscoveryPolicy against a Prometheus endpoint with a Mimir-style `/prometheus` base path (via nginx proxy) |
 | `discovery-loki/` | DiscoveryPolicy with real Alloy-ingested Loki events + eventPullTime signals |
 | `discovery-modelexposure/` | DiscoveryPolicy modelExposure ranking with dynamic nodeSelector node count |
 | `discovery-registry/` | DiscoveryPolicy listing tags from a mock registry |

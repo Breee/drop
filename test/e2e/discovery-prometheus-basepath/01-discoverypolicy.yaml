@@ -1,0 +1,28 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: DiscoveryPolicy
+metadata:
+  name: e2e-discovery-basepath
+spec:
+  queries:
+    - name: runner-image-usage
+      type: prometheus
+      prometheus:
+        # nginx proxy that serves the Prometheus API under a /prometheus base
+        # path (Mimir-style). Drop must preserve this prefix instead of
+        # overwriting it, otherwise the request hits nginx root and 404s.
+        endpoint: "http://prometheus-proxy.e2e-infra.svc.cluster.local/prometheus"
+        queryType: range
+        lookback: 24h
+        step: 5m
+        query: 'count(container_memory_working_set_bytes{container!="", namespace="build-stuff"}) by (image)'
+  signals:
+    - name: total-usage
+      query: runner-image-usage
+      type: aggregate
+      aggregate:
+        method: sum
+  ranking:
+    strategy: signal
+    signal: total-usage
+  syncInterval: 30s
+  maxImages: 10

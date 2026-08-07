@@ -1,0 +1,78 @@
+# nginx proxy exposing Prometheus two ways:
+#   - /            -> root passthrough (plain Prometheus)
+#   - /prometheus/ -> Mimir-style base path (strips the prefix)
+# Used by the discovery-prometheus-basepath e2e test to prove Drop preserves a
+# configured endpoint base path instead of overwriting it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-proxy-config
+  namespace: e2e-infra
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 8080;
+        # Mimir-style base path: strip /prometheus before forwarding.
+        location /prometheus/ {
+          proxy_pass http://prometheus.e2e-infra.svc.cluster.local:9090/;
+        }
+        # Root passthrough for plain-Prometheus behaviour.
+        location / {
+          proxy_pass http://prometheus.e2e-infra.svc.cluster.local:9090/;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-proxy
+  namespace: e2e-infra
+  labels:
+    app: prometheus-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-proxy
+  template:
+    metadata:
+      labels:
+        app: prometheus-proxy
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-proxy
+  namespace: e2e-infra
+  labels:
+    app: prometheus-proxy
+spec:
+  selector:
+    app: prometheus-proxy
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
