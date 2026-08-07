@@ -1,7 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "schedule:daily"
   ],
   "minimumReleaseAge": "3 days",
   "postUpdateOptions": ["gomodTidy"],
