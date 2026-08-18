@@ -240,7 +240,10 @@ func (p *PrometheusSource) FetchRaw(ctx context.Context) (map[string][]TimedSamp
 	q.Set("query", p.Query)
 
 	if p.QueryType == dropv1alpha1.QueryTypeRange {
-		u.Path = "/api/v1/query_range"
+		u.Path, err = url.JoinPath(u.Path, "/api/v1/query_range")
+		if err != nil {
+			return nil, fmt.Errorf("building query URL: %w", err)
+		}
 		now := time.Now().UTC()
 		lookback := p.Lookback
 		if lookback == 0 {
@@ -254,7 +257,10 @@ func (p *PrometheusSource) FetchRaw(ctx context.Context) (map[string][]TimedSamp
 		q.Set("end", now.Format(time.RFC3339))
 		q.Set("step", fmt.Sprintf("%ds", int(step.Seconds())))
 	} else {
-		u.Path = "/api/v1/query"
+		u.Path, err = url.JoinPath(u.Path, "/api/v1/query")
+		if err != nil {
+			return nil, fmt.Errorf("building query URL: %w", err)
+		}
 	}
 	u.RawQuery = q.Encode()
 

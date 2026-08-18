@@ -336,6 +336,48 @@ func TestPrometheusSource_DefaultQueryType(t *testing.T) {
 	}
 }
 
+// Mimir/Thanos style endpoints carry a base path (e.g. /prometheus). Both Fetch
+// and FetchRaw must append the API path instead of replacing it.
+func TestPrometheusSource_PreservesEndpointBasePath(t *testing.T) {
+	tests := []struct {
+		name      string
+		queryType dropv1alpha1.QueryType
+		wantPath  string
+	}{
+		{"range", dropv1alpha1.QueryTypeRange, "/prometheus/api/v1/query_range"},
+		{"instant", dropv1alpha1.QueryTypeInstant, "/prometheus/api/v1/query"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPaths = append(gotPaths, r.URL.Path)
+				if r.URL.Path != tt.wantPath {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				resp := prometheusResponse{Status: prometheusStatusSuccess}
+				w.WriteHeader(http.StatusOK)
+				if err := json.NewEncoder(w).Encode(resp); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer server.Close()
+
+			source := NewPrometheusSource(server.URL+"/prometheus", "test_query", tt.queryType,
+				time.Hour, nil, 5*time.Minute, server.Client())
+
+			if _, err := source.Fetch(context.Background()); err != nil {
+				t.Errorf("Fetch() error = %v; requested paths %v, want %q", err, gotPaths, tt.wantPath)
+			}
+			if _, err := source.FetchRaw(context.Background()); err != nil {
+				t.Errorf("FetchRaw() error = %v; requested paths %v, want %q", err, gotPaths, tt.wantPath)
+			}
+		})
+	}
+}
+
 func aggregationMethodPtr(m dropv1alpha1.AggregationMethod) *dropv1alpha1.AggregationMethod {
 	return &m
 }

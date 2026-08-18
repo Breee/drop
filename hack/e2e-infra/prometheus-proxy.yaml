@@ -1,8 +1,7 @@
-# nginx proxy exposing Prometheus two ways:
-#   - /            -> root passthrough (plain Prometheus)
-#   - /prometheus/ -> Mimir-style base path (strips the prefix)
-# Used by the discovery-prometheus-basepath e2e test to prove Drop preserves a
-# configured endpoint base path instead of overwriting it.
+# nginx proxy exposing Prometheus ONLY under a Mimir-style /prometheus base path.
+# The root deliberately 404s, mirroring a real Mimir gateway: without this, a
+# root passthrough would silently absorb requests where Drop dropped the base
+# path and the regression guard would pass against a broken build.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,9 +17,9 @@ data:
         location /prometheus/ {
           proxy_pass http://prometheus.e2e-infra.svc.cluster.local:9090/;
         }
-        # Root passthrough for plain-Prometheus behaviour.
+        # No root passthrough: anything outside the base path must 404.
         location / {
-          proxy_pass http://prometheus.e2e-infra.svc.cluster.local:9090/;
+          return 404;
         }
       }
     }
