@@ -8,6 +8,10 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -151,6 +155,78 @@ var _ = Describe("DiscoveryPolicy Controller", func() {
 			Expect(updated.Status.QueryResults).To(HaveLen(1))
 			Expect(updated.Status.QueryResults[0].Name).To(Equal("reg-query"))
 			Expect(updated.Status.QueryResults[0].Type).To(Equal(dropv1alpha1.DiscoveryQueryTypeRegistry))
+		})
+
+		It("does not re-query the backend while the last successful sync is still fresh", func() {
+			const gateResourceName = "test-discovery-gate"
+
+			var queries int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&queries, 1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":` +
+					`[{"metric":{"image":"registry.example.com/app:v1"},"value":[1,"5"]}]}}`))
+			}))
+			defer srv.Close()
+
+			resource := &dropv1alpha1.DiscoveryPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: gateResourceName},
+				Spec: dropv1alpha1.DiscoveryPolicySpec{
+					SyncInterval: metav1.Duration{Duration: time.Hour},
+					Queries: []dropv1alpha1.DiscoveryQuery{{
+						Name: "prom-query",
+						Type: dropv1alpha1.DiscoveryQueryTypePrometheus,
+						Prometheus: &dropv1alpha1.DiscoveryPrometheusQuery{
+							Endpoint:  srv.URL,
+							Query:     "test_query",
+							QueryType: dropv1alpha1.QueryTypeInstant,
+						},
+					}},
+					Signals: []dropv1alpha1.DiscoverySignal{{
+						Name:      "usage",
+						Query:     "prom-query",
+						Type:      dropv1alpha1.SignalTypeAggregate,
+						Aggregate: &dropv1alpha1.AggregateSignalConfig{Method: dropv1alpha1.AggregationSum},
+					}},
+					Ranking: &dropv1alpha1.DiscoveryRanking{
+						Strategy: dropv1alpha1.RankingStrategySignal,
+						Signal:   "usage",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, resource) }()
+
+			controllerReconciler := &DiscoveryPolicyReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			request := reconcile.Request{NamespacedName: types.NamespacedName{Name: gateResourceName}}
+
+			By("performing the initial sync")
+			result, err := controllerReconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(atomic.LoadInt32(&queries)).To(Equal(int32(1)))
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			synced := &dropv1alpha1.DiscoveryPolicy{}
+			Expect(k8sClient.Get(ctx, request.NamespacedName, synced)).To(Succeed())
+			Expect(synced.Status.ImageCount).To(Equal(int32(1)))
+
+			By("re-reconciling immediately, as a restart or extra watch event would")
+			result, err = controllerReconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(atomic.LoadInt32(&queries)).To(Equal(int32(1)), "backend must not be queried again within syncInterval")
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0), "must stay scheduled for the next sync")
+
+			By("expiring the interval so the next reconcile syncs again")
+			stale := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+			synced.Status.LastSyncTime = &stale
+			Expect(k8sClient.Status().Update(ctx, synced)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(atomic.LoadInt32(&queries)).To(Equal(int32(2)))
 		})
 
 		It("uses the configured secret namespace for discovery source credentials", func() {

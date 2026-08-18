@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"net/url"
@@ -27,8 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	dropv1alpha1 "github.com/corewire/drop/api/v1alpha1"
 	"github.com/corewire/drop/internal/discovery"
@@ -46,6 +49,8 @@ const (
 	reasonDNSError          = "DNSError"
 	reasonConnectionRefused = "ConnectionRefused"
 	secretHeaderPrefix      = "headers."
+
+	defaultDiscoverySyncInterval = 30 * time.Minute
 )
 
 // +kubebuilder:rbac:groups=drop.corewire.io,resources=discoverypolicies,verbs=get;list;watch;create;update;patch;delete
@@ -67,12 +72,26 @@ func (r *DiscoveryPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// 2. Skip the backend queries while the last successful sync is still fresh.
+	// Reconcile is enqueued by more than the sync timer (operator restart, cache
+	// resync, future watches); without this gate each of those re-runs every
+	// query. Failed syncs deliberately fall through to the workqueue backoff.
+	syncInterval := dp.Spec.SyncInterval.Duration
+	if syncInterval == 0 {
+		syncInterval = defaultDiscoverySyncInterval
+	}
+	if dp.Status.LastSyncTime != nil && meta.IsStatusConditionTrue(dp.Status.Conditions, conditionTypeReady) {
+		if elapsed := time.Since(dp.Status.LastSyncTime.Time); elapsed < syncInterval {
+			return ctrl.Result{RequeueAfter: syncInterval - elapsed}, nil
+		}
+	}
+
 	log.Info("reconciling DiscoveryPolicy",
 		"queries", len(dp.Spec.Queries),
 		"signals", len(dp.Spec.Signals),
 	)
 
-	// 2. Execute pipeline
+	// 3. Execute pipeline
 	// Resolve dynamic node count (modelExposure nodeSelector) into a spec copy so
 	// the pure pipeline sees a concrete N. The live object is never mutated.
 	spec := dp.Spec.DeepCopy()
@@ -82,7 +101,7 @@ func (r *DiscoveryPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	httpClientFunc := r.buildHTTPClientFunc(dp)
 	result := discovery.ExecutePipeline(ctx, *spec, httpClientFunc)
 
-	// 3. Build status patch
+	// 4. Build status patch
 	patch := client.MergeFrom(dp.DeepCopy())
 	now := metav1.Now()
 
@@ -125,17 +144,26 @@ func (r *DiscoveryPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// 5. Requeue after sync interval
-	syncInterval := dp.Spec.SyncInterval.Duration
-	if syncInterval == 0 {
-		syncInterval = 30 * time.Minute
-	}
-
 	// Return an error to trigger rate-limited backoff when all queries failed and no images available.
 	if !allHealthy && len(result.Images) == 0 {
 		return ctrl.Result{}, fmt.Errorf("discovery sync failed: %s", failMsg)
 	}
 
-	return ctrl.Result{RequeueAfter: syncInterval}, nil
+	return ctrl.Result{RequeueAfter: jitterInterval(syncInterval, dp.Name)}, nil
+}
+
+// jitterInterval offsets the next sync by a stable per-policy amount within ±10%,
+// so policies applied together (e.g. one GitOps sync) do not hit a shared backend
+// in lockstep. Derived from the name rather than randomly so the offset survives
+// operator restarts instead of re-clustering.
+func jitterInterval(d time.Duration, name string) time.Duration {
+	spread := int64(d) / 5
+	if spread <= 0 {
+		return d
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return d - time.Duration(spread/2) + time.Duration(h.Sum64()%uint64(spread))
 }
 
 // buildHTTPClientFunc returns a discovery.HTTPClientFunc that provides per-query auth/TLS clients.
@@ -514,7 +542,10 @@ func drainAndClose(resp *http.Response) {
 // SetupWithManager sets up the controller with the Manager.
 func (r *DiscoveryPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dropv1alpha1.DiscoveryPolicy{}).
+		// Every reconcile writes status (LastSyncTime always moves), which would
+		// re-trigger this watch and spin a hot loop. Only spec changes may enqueue;
+		// periodic syncs come from RequeueAfter.
+		For(&dropv1alpha1.DiscoveryPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("discoverypolicy").
 		Complete(r)
 }
