@@ -1,0 +1,15 @@
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImageSet
+metadata:
+  name: test-set-foreground
+spec:
+  images:
+    # Same short name from different registries. imageName() keeps only the last
+    # path segment, so these two used to collide on one child name: one child
+    # could never be created and the set retried it forever.
+    - image: docker.io/library/alpine
+      tag: "3.19"
+    - image: registry.k8s.io/pause
+      tag: "3.10"
+    - image: docker.io/library/pause
+      tag: "3.10"

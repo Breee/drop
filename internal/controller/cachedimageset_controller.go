@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -50,6 +51,13 @@ func (r *CachedImageSetReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Under foreground deletion the set lingers until its children are gone, and
+	// children set blockOwnerDeletion. Recreating them here would keep that count
+	// above zero forever and the delete would never complete. Leave it to the GC.
+	if !imageSet.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
 	}
 
 	// 2. Build desired image list
@@ -281,10 +289,7 @@ func parseImageRef(ref string) dropv1alpha1.ImageEntry {
 
 // buildChildCachedImage creates a CachedImage spec from an ImageEntry.
 func (r *CachedImageSetReconciler) buildChildCachedImage(parent *dropv1alpha1.CachedImageSet, img dropv1alpha1.ImageEntry) *dropv1alpha1.CachedImage {
-	name := sanitizeName(fmt.Sprintf("%s-%s-%s", parent.Name, imageName(img.Image), img.Tag))
-	if img.Digest != "" {
-		name = sanitizeName(fmt.Sprintf("%s-%s-digest", parent.Name, imageName(img.Image)))
-	}
+	name := childName(parent.Name, img)
 
 	child := &dropv1alpha1.CachedImage{
 		ObjectMeta: metav1.ObjectMeta{
@@ -333,6 +338,29 @@ func buildEntryRef(entry dropv1alpha1.ImageEntry) string {
 func imageName(image string) string {
 	parts := strings.Split(image, "/")
 	return parts[len(parts)-1]
+}
+
+// childName builds the name of the child CachedImage for an image entry.
+// imageName() keeps only the last path segment, so entries that differ solely by
+// registry or org (rd/tools vs dos-devinfra/tools) would otherwise collide on one
+// name and the loser could never be created. The ref digest keeps names unique.
+func childName(parentName string, img dropv1alpha1.ImageEntry) string {
+	suffix := img.Tag
+	switch {
+	case img.Digest != "":
+		suffix = "digest"
+	case suffix == "":
+		suffix = "latest"
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(buildEntryRef(img)))
+	unique := fmt.Sprintf("%06x", h.Sum64()&0xffffff)
+
+	base := sanitizeName(fmt.Sprintf("%s-%s-%s", parentName, imageName(img.Image), suffix))
+	if limit := 253 - len(unique) - 1; len(base) > limit {
+		base = base[:limit]
+	}
+	return base + "-" + unique
 }
 
 // sanitizeName ensures the name is a valid k8s resource name.

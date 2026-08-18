@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: cachedimageset-deletion-foreground
+spec:
+  description: |
+    Verify that a CachedImageSet can be deleted with Foreground propagation, and
+    that images sharing a short name across registries each get their own child.
+
+    The existing cachedimageset test deletes with the default Background policy,
+    where the parent disappears at once and the controller simply stops. Under
+    Foreground the parent lingers with a deletionTimestamp until every child with
+    blockOwnerDeletion is gone — a controller that keeps reconciling recreates
+    those children, the count never reaches zero and the delete hangs forever.
+  steps:
+    - name: Create a CachedImageSet with images sharing a short name
+      try:
+        - apply:
+            file: 01-cachedimageset.yaml
+    - name: Assert one child per distinct image ref
+      try:
+        - assert:
+            timeout: 60s
+            file: 02-assert-children.yaml
+
+    - name: Delete with Foreground propagation and require it to finish
+      try:
+        - delete:
+            timeout: 90s
+            deletionPropagationPolicy: Foreground
+            ref:
+              apiVersion: drop.corewire.io/v1alpha1
+              kind: CachedImageSet
+              name: test-set-foreground
+    - name: Assert no children survived
+      try:
+        - error:
+            timeout: 60s
+            file: 03-assert-no-children.yaml
+
+    - name: Assert the children are not recreated after deletion
+      try:
+        - script:
+            timeout: 45s
+            content: |
+              set -eu
+              deadline=$(( $(date +%s) + 20 ))
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                n=$(kubectl get cachedimages \
+                  -l drop.corewire.io/imageset=test-set-foreground \
+                  --no-headers 2>/dev/null | wc -l | tr -d ' ')
+                case "$n" in ''|*[!0-9]*) n=0 ;; esac
+                if [ "$n" -ne 0 ]; then
+                  echo "FAIL: $n child CachedImage(s) reappeared after the set was deleted"
+                  kubectl get cachedimages -l drop.corewire.io/imageset=test-set-foreground
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "OK: no children recreated"

@@ -22,6 +22,7 @@ make test-e2e
 | `cachedimage-failure/` | Failure backoff and Degraded phase behavior |
 | `cachedimage-pacing/` | PullPolicy pacing enforcement |
 | `cachedimageset/` | CachedImageSet managing child resources |
+| `cachedimageset-deletion-foreground/` | Foreground-propagation deletion completes, and short-name collisions across registries get distinct children |
 | `cachedimageset-discovery/` | CachedImageSet backed by a DiscoveryPolicy |
 | `discovery/` | DiscoveryPolicy with mock Prometheus |
 | `discovery-failure/` | DiscoveryPolicy with unreachable Prometheus endpoint |

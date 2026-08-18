@@ -1,0 +1,6 @@
+# No child CachedImage may survive the parent's deletion.
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImage
+metadata:
+  labels:
+    drop.corewire.io/imageset: test-set-foreground

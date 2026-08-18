@@ -1,0 +1,8 @@
+# Every distinct image ref must get its own child. Two of these share the short
+# name "pause", so a name collision would yield fewer than three.
+apiVersion: drop.corewire.io/v1alpha1
+kind: CachedImageSet
+metadata:
+  name: test-set-foreground
+status:
+  imagesManaged: 3

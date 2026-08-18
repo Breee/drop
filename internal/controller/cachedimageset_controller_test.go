@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,6 +71,76 @@ var _ = Describe("CachedImageSet Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("stops recreating children once the set is terminating", func() {
+			const setName = "test-imageset-terminating"
+			setKey := types.NamespacedName{Name: setName}
+
+			// envtest runs no garbage collector, so a finalizer is what keeps the
+			// object observable in the terminating state that foreground deletion
+			// produces in a real cluster.
+			resource := &dropv1alpha1.CachedImageSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       setName,
+					Finalizers: []string{"drop.corewire.io/test-hold"},
+				},
+				Spec: dropv1alpha1.CachedImageSetSpec{
+					Images: []dropv1alpha1.ImageEntry{
+						{Image: "docker.io/library/nginx", Tag: "1.25"},
+						{Image: "docker.io/library/redis", Tag: "7"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			defer func() {
+				current := &dropv1alpha1.CachedImageSet{}
+				if err := k8sClient.Get(ctx, setKey, current); err == nil {
+					current.Finalizers = nil
+					Expect(k8sClient.Update(ctx, current)).To(Succeed())
+				}
+			}()
+
+			controllerReconciler := &CachedImageSetReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			request := reconcile.Request{NamespacedName: setKey}
+
+			By("reconciling once so the children exist")
+			_, err := controllerReconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+
+			children := &dropv1alpha1.CachedImageList{}
+			listOpts := client.MatchingLabels{labelImageSet: setName}
+			Expect(k8sClient.List(ctx, children, listOpts)).To(Succeed())
+			Expect(children.Items).To(HaveLen(2))
+
+			By("deleting the set, which leaves it terminating behind the finalizer")
+			current := &dropv1alpha1.CachedImageSet{}
+			Expect(k8sClient.Get(ctx, setKey, current)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+
+			terminating := &dropv1alpha1.CachedImageSet{}
+			Expect(k8sClient.Get(ctx, setKey, terminating)).To(Succeed())
+			Expect(terminating.DeletionTimestamp.IsZero()).To(BeFalse())
+
+			By("removing the children as the garbage collector would")
+			for i := range children.Items {
+				Expect(k8sClient.Delete(ctx, &children.Items[i])).To(Succeed())
+			}
+			remaining := &dropv1alpha1.CachedImageList{}
+			Expect(k8sClient.List(ctx, remaining, listOpts)).To(Succeed())
+			Expect(remaining.Items).To(BeEmpty())
+
+			By("reconciling again: the children must not come back")
+			_, err = controllerReconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+
+			after := &dropv1alpha1.CachedImageList{}
+			Expect(k8sClient.List(ctx, after, listOpts)).To(Succeed())
+			Expect(after.Items).To(BeEmpty(),
+				"terminating set recreated its children, so deletion could never finish")
 		})
 	})
 

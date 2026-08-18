@@ -84,6 +84,11 @@ func (r *CachedImageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Terminating: don't schedule new pull Pods, they would only be orphaned.
+	if !ci.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
 	// 2-3. Resolve target nodes
 	targetNodes, err := r.resolveTargetNodes(ctx, ci)
 	if err != nil {
@@ -580,6 +585,10 @@ func (r *CachedImageReconciler) updateCachedImageStatus(ci *dropv1alpha1.CachedI
 	}
 	sort.Strings(cachedNodes)
 
+	// Captured before NodesReady is overwritten: a growing ready count is what
+	// distinguishes a completed pull from a plain re-observation.
+	pullCompleted := nodesReady > ci.Status.NodesReady
+
 	ci.Status.ObservedGeneration = ci.Generation
 	ci.Status.NodesTargeted = nodesTargeted
 	ci.Status.NodesReady = nodesReady
@@ -596,7 +605,9 @@ func (r *CachedImageReconciler) updateCachedImageStatus(ci *dropv1alpha1.CachedI
 		ci.Status.ConsecutiveFailures = 0
 	}
 
-	if nodesReady > 0 {
+	// Only stamp on an actual pull. Refreshing this every reconcile rewrites the
+	// object forever and keeps markNodesForRepull's elapsed time permanently at ~0.
+	if pullCompleted || (ci.Status.LastPulledAt == nil && nodesReady > 0) {
 		ci.Status.LastPulledAt = &now
 	}
 
@@ -813,7 +824,9 @@ func (r *CachedImageReconciler) mapNodeToCachedImages(ctx context.Context, _ cli
 // SetupWithManager sets up the controller with the Manager.
 func (r *CachedImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dropv1alpha1.CachedImage{}).
+		// Status writes must not re-trigger this watch; pull progress is driven by
+		// the Pod watch below and by RequeueAfter, not by observing our own writes.
+		For(&dropv1alpha1.CachedImage{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Watch nodes so scale-out/scale-in events trigger reconciliation immediately.
 		Watches(
 			&corev1.Node{},
