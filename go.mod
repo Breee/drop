@@ -2,7 +2,7 @@ module github.com/corewire/drop
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 godebug default=go1.26
 
