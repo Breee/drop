@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.26
 
 # Build the manager binary
-FROM --platform=$BUILDPLATFORM docker.io/golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/golang:1.27 AS builder
 ARG BUILDPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
